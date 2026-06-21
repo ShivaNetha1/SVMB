@@ -1,0 +1,949 @@
+{
+  "name": "SVMB Telegram Bot — Marriage Bureau",
+  "flow": [
+    {
+      "id": 1,
+      "module": "telegram:watchUpdates",
+      "version": 4,
+      "parameters": {
+        "updates": ["message"],
+        "limit": 1
+      },
+      "mapper": {},
+      "metadata": {
+        "designer": { "x": 0, "y": 0 },
+        "restore": {},
+        "expect": [
+          { "name": "message", "type": "collection" }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "module": "builtin:BasicRouter",
+      "version": 1,
+      "parameters": {},
+      "mapper": {},
+      "metadata": {
+        "designer": { "x": 300, "y": 0 }
+      },
+      "routes": [
+        {
+          "name": "Branch 1 — EDIT Command",
+          "flow": [
+            {
+              "id": 10,
+              "module": "builtin:BasicFeeder",
+              "version": 1,
+              "parameters": {},
+              "filter": {
+                "name": "Starts with EDIT",
+                "conditions": [
+                  [
+                    {
+                      "a": "{{1.message.text}}",
+                      "b": "EDIT",
+                      "o": "pattern",
+                      "pattern": "^EDIT\\s"
+                    }
+                  ]
+                ]
+              },
+              "mapper": {
+                "unique_code": "{{trim(nth(split(1.message.text; \" \"); 2))}}",
+                "field_name": "{{trim(nth(split(1.message.text; \" \"); 3))}}",
+                "new_value": "{{trim(join(slice(split(1.message.text; \" \"); 3); \" \"))}}"
+              },
+              "metadata": {
+                "designer": { "x": 600, "y": -400 },
+                "expect": [
+                  { "name": "unique_code", "type": "text" },
+                  { "name": "field_name", "type": "text" },
+                  { "name": "new_value", "type": "text" }
+                ]
+              }
+            },
+            {
+              "id": 11,
+              "module": "supabase:ActionUpdateARecord",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "clients",
+                "filter": "unique_code=eq.{{10.unique_code}}",
+                "data": {
+                  "{{10.field_name}}": "{{10.new_value}}"
+                }
+              },
+              "metadata": {
+                "designer": { "x": 900, "y": -400 },
+                "note": "UPDATE clients SET [field_name] = [new_value] WHERE unique_code = [unique_code]"
+              }
+            },
+            {
+              "id": 12,
+              "module": "supabase:ActionCreateARecord",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "activity_log",
+                "data": {
+                  "event_type": "correction_applied",
+                  "telegram_message": "{{1.message.text}}",
+                  "details": "EDIT command: Updated {{10.field_name}} to '{{10.new_value}}' for {{10.unique_code}}"
+                }
+              },
+              "metadata": {
+                "designer": { "x": 1200, "y": -400 }
+              }
+            },
+            {
+              "id": 13,
+              "module": "telegram:sendMessage",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "chatId": "{{1.message.chat.id}}",
+                "text": "✅ Updated {{10.field_name}} for {{10.unique_code}}",
+                "parseMode": "HTML"
+              },
+              "metadata": {
+                "designer": { "x": 1500, "y": -400 }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Branch 2 — Photo with Caption (Full Biodata)",
+          "flow": [
+            {
+              "id": 20,
+              "module": "builtin:BasicFeeder",
+              "version": 1,
+              "parameters": {},
+              "filter": {
+                "name": "Has Photo AND Caption",
+                "conditions": [
+                  [
+                    {
+                      "a": "{{1.message.photo}}",
+                      "o": "exist"
+                    },
+                    {
+                      "a": "{{1.message.caption}}",
+                      "o": "exist"
+                    }
+                  ]
+                ]
+              },
+              "mapper": {
+                "caption_text": "{{1.message.caption}}",
+                "has_mb": "{{if(test(1.message.caption; \"(?i)[a-z0-9]*mb[a-z0-9]*\"); true; false)}}",
+                "mb_code": "{{if(test(1.message.caption; \"(?i)([A-Za-z0-9]*[Mm][Bb][A-Za-z0-9]*)\"); first(match(1.message.caption; \"(?i)([A-Za-z0-9]*[Mm][Bb][A-Za-z0-9]*)\")); \"SVMB\")}}"
+              },
+              "metadata": {
+                "designer": { "x": 600, "y": -200 }
+              }
+            },
+            {
+              "id": 21,
+              "module": "openai:createChatCompletion",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "model": "gpt-4o-mini",
+                "messages": [
+                  {
+                    "role": "system",
+                    "content": "You are a data extraction assistant for Sri Venkateshwara Marriage Bureau. You will receive raw biodata text in any format — it may be unstructured, contain spelling variations, be in English mixed with Telugu or Hindi words, or have missing fields.\n\nExtract the following fields and return ONLY a valid JSON object. No preamble, no explanation, no markdown code fences. Just raw JSON.\n\nRules:\n- For name: if format is \"Initial.Name\" (e.g. M.Aishwarya or K. Suresh), the initial before the dot is first_name, everything after is last_name. If format is \"Firstname Lastname\", split normally. If only one name, put it in first_name, last_name = null.\n- For gender: detect from name context, explicit mention, or family clues (e.g. \"sister of\", \"bride\", \"groom\"). If cannot determine, return null.\n- For dob: return in YYYY-MM-DD format. Accept inputs like 29-08-1998, 29/08/1998, Aug 29 1998, etc.\n- For height: return as provided (e.g. \"5.1\", \"5'4\\\"\", \"162cm\")\n- For siblings: return the full text block exactly as written.\n- For address: return the full multi-line address as a single string.\n- If a field is not present in the biodata, return null for that field.\n- Do not guess or hallucinate any field values.\n\nReturn this JSON structure:\n{\"first_name\":\"\",\"last_name\":null,\"gender\":null,\"dob\":\"\",\"birth_time\":null,\"place_of_birth\":null,\"rashi\":null,\"height\":\"\",\"education\":\"\",\"religion\":null,\"caste\":null,\"address\":\"\",\"phone\":null,\"father_name\":null,\"father_occupation\":null,\"mother_name\":null,\"mother_occupation\":null,\"siblings\":null}"
+                  },
+                  {
+                    "role": "user",
+                    "content": "{{20.caption_text}}"
+                  }
+                ],
+                "temperature": 0.1,
+                "max_tokens": 1000
+              },
+              "metadata": {
+                "designer": { "x": 900, "y": -200 },
+                "note": "GPT-4o mini extracts structured data from biodata text"
+              }
+            },
+            {
+              "id": 22,
+              "module": "json:ParseJSON",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "json": "{{21.choices[].message.content}}"
+              },
+              "metadata": {
+                "designer": { "x": 1100, "y": -200 },
+                "note": "Parse the JSON response from GPT"
+              }
+            },
+            {
+              "id": 23,
+              "module": "telegram:downloadFile",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "fileId": "{{last(1.message.photo).file_id}}"
+              },
+              "metadata": {
+                "designer": { "x": 1300, "y": -200 },
+                "note": "Download the highest resolution photo"
+              }
+            },
+            {
+              "id": 24,
+              "module": "supabase:ActionUploadFile",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "bucket": "profile-photos",
+                "path": "{{formatDate(now; \"YYYYMMDD_HHmmss\")}}_{{substring(uuid; 0; 8)}}.jpg",
+                "file": "{{23.data}}",
+                "contentType": "image/jpeg"
+              },
+              "metadata": {
+                "designer": { "x": 1500, "y": -200 },
+                "note": "Upload photo to Supabase Storage"
+              }
+            },
+            {
+              "id": 25,
+              "module": "supabase:ActionSelectRows",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "clients",
+                "select": "id_number",
+                "filter": "{{if(20.has_mb; \"source_bureau=eq.\" + 20.mb_code + \"&\"; \"bureau_type=eq.own&\")}}gender=eq.{{22.gender}}&order=id_number.desc&limit=1"
+              },
+              "metadata": {
+                "designer": { "x": 1700, "y": -200 },
+                "note": "Get MAX(id_number) for unique code generation"
+              }
+            },
+            {
+              "id": 26,
+              "module": "builtin:BasicFeeder",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "bureau_code": "{{if(20.has_mb; 20.mb_code; \"SVMB\")}}",
+                "bureau_type": "{{if(20.has_mb; \"partner\"; \"own\")}}",
+                "start_num": "{{if(20.has_mb; 600; 100)}}",
+                "next_id": "{{if(length(25) > 0; 25[].id_number + 1; if(20.has_mb; 601; 101))}}",
+                "gender_prefix": "{{if(22.gender = \"Male\"; \"M\"; if(22.gender = \"Female\"; \"F\"; \"X\"))}}",
+                "unique_code": "{{if(22.gender != null; 26.bureau_code + \"-\" + 26.gender_prefix + \"-\" + 26.next_id; \"PENDING\")}}",
+                "photo_public_url": "{{24.publicUrl}}"
+              },
+              "metadata": {
+                "designer": { "x": 1900, "y": -200 },
+                "note": "Compute unique_code and other derived values"
+              }
+            },
+            {
+              "id": 27,
+              "module": "supabase:ActionCreateARecord",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "clients",
+                "data": {
+                  "unique_code": "{{26.unique_code}}",
+                  "id_number": "{{26.next_id}}",
+                  "bureau_type": "{{26.bureau_type}}",
+                  "source_bureau": "{{26.bureau_code}}",
+                  "first_name": "{{22.first_name}}",
+                  "last_name": "{{22.last_name}}",
+                  "dob": "{{22.dob}}",
+                  "birth_time": "{{22.birth_time}}",
+                  "place_of_birth": "{{22.place_of_birth}}",
+                  "rashi": "{{22.rashi}}",
+                  "height": "{{22.height}}",
+                  "education": "{{22.education}}",
+                  "religion": "{{22.religion}}",
+                  "caste": "{{22.caste}}",
+                  "gender": "{{22.gender}}",
+                  "address": "{{22.address}}",
+                  "phone": "{{22.phone}}",
+                  "father_name": "{{22.father_name}}",
+                  "father_occupation": "{{22.father_occupation}}",
+                  "mother_name": "{{22.mother_name}}",
+                  "mother_occupation": "{{22.mother_occupation}}",
+                  "siblings": "{{22.siblings}}",
+                  "photo_url": "{{26.photo_public_url}}",
+                  "payment_status": "Not Paid",
+                  "profile_status": "Active",
+                  "match_status": "Unmatched"
+                }
+              },
+              "metadata": {
+                "designer": { "x": 2100, "y": -200 },
+                "note": "Insert complete client record"
+              }
+            },
+            {
+              "id": 28,
+              "module": "supabase:ActionCreateARecord",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "activity_log",
+                "data": {
+                  "event_type": "profile_created",
+                  "client_id": "{{27.id}}",
+                  "telegram_message": "{{1.message.caption}}",
+                  "details": "Profile created via Telegram (photo+caption): {{26.unique_code}} - {{22.first_name}} {{22.last_name}}"
+                }
+              },
+              "metadata": {
+                "designer": { "x": 2300, "y": -200 }
+              }
+            },
+            {
+              "id": 29,
+              "module": "telegram:sendMessage",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "chatId": "{{1.message.chat.id}}",
+                "text": "✅ Profile Saved — {{26.unique_code}}\n━━━━━━━━━━━━━━━━━━━━\n👤 Name     : {{22.first_name}} {{22.last_name}}\n⚥  Gender   : {{if(22.gender; 22.gender; \"Not detected\")}}\n🎂 DOB      : {{22.dob}}\n📏 Height   : {{22.height}}\n🎓 Education: {{22.education}}\n📍 Location : {{if(22.place_of_birth; 22.place_of_birth; substring(22.address; 0; 40))}}\n🏠 Bureau   : {{26.bureau_code}}\n💳 Payment  : Not Paid\n📸 Photo    : Linked ✅\n━━━━━━━━━━━━━━━━━━━━\nSend EDIT {{26.unique_code}} [field] [value] to correct any detail.",
+                "parseMode": ""
+              },
+              "metadata": {
+                "designer": { "x": 2500, "y": -200 }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Branch 3 — Text Only (No Photo)",
+          "flow": [
+            {
+              "id": 30,
+              "module": "builtin:BasicFeeder",
+              "version": 1,
+              "parameters": {},
+              "filter": {
+                "name": "Text only, no photo, not EDIT",
+                "conditions": [
+                  [
+                    {
+                      "a": "{{1.message.text}}",
+                      "o": "exist"
+                    },
+                    {
+                      "a": "{{1.message.photo}}",
+                      "o": "notExist"
+                    },
+                    {
+                      "a": "{{1.message.text}}",
+                      "b": "^EDIT\\s",
+                      "o": "pattern:notMatches"
+                    },
+                    {
+                      "a": "{{1.message.document}}",
+                      "o": "notExist"
+                    }
+                  ]
+                ]
+              },
+              "mapper": {
+                "message_text": "{{1.message.text}}",
+                "has_mb": "{{if(test(1.message.text; \"(?i)[a-z0-9]*mb[a-z0-9]*\"); true; false)}}",
+                "mb_code": "{{if(test(1.message.text; \"(?i)([A-Za-z0-9]*[Mm][Bb][A-Za-z0-9]*)\")); first(match(1.message.text; \"(?i)([A-Za-z0-9]*[Mm][Bb][A-Za-z0-9]*)\")); \"SVMB\")}}"
+              },
+              "metadata": {
+                "designer": { "x": 600, "y": 0 }
+              }
+            },
+            {
+              "id": 31,
+              "module": "openai:createChatCompletion",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "model": "gpt-4o-mini",
+                "messages": [
+                  {
+                    "role": "system",
+                    "content": "You are a data extraction assistant for Sri Venkateshwara Marriage Bureau. You will receive raw biodata text in any format — it may be unstructured, contain spelling variations, be in English mixed with Telugu or Hindi words, or have missing fields.\n\nExtract the following fields and return ONLY a valid JSON object. No preamble, no explanation, no markdown code fences. Just raw JSON.\n\nRules:\n- For name: if format is \"Initial.Name\" (e.g. M.Aishwarya or K. Suresh), the initial before the dot is first_name, everything after is last_name. If format is \"Firstname Lastname\", split normally. If only one name, put it in first_name, last_name = null.\n- For gender: detect from name context, explicit mention, or family clues (e.g. \"sister of\", \"bride\", \"groom\"). If cannot determine, return null.\n- For dob: return in YYYY-MM-DD format. Accept inputs like 29-08-1998, 29/08/1998, Aug 29 1998, etc.\n- For height: return as provided (e.g. \"5.1\", \"5'4\\\"\", \"162cm\")\n- For siblings: return the full text block exactly as written.\n- For address: return the full multi-line address as a single string.\n- If a field is not present in the biodata, return null for that field.\n- Do not guess or hallucinate any field values.\n\nReturn this JSON structure:\n{\"first_name\":\"\",\"last_name\":null,\"gender\":null,\"dob\":\"\",\"birth_time\":null,\"place_of_birth\":null,\"rashi\":null,\"height\":\"\",\"education\":\"\",\"religion\":null,\"caste\":null,\"address\":\"\",\"phone\":null,\"father_name\":null,\"father_occupation\":null,\"mother_name\":null,\"mother_occupation\":null,\"siblings\":null}"
+                  },
+                  {
+                    "role": "user",
+                    "content": "{{30.message_text}}"
+                  }
+                ],
+                "temperature": 0.1,
+                "max_tokens": 1000
+              },
+              "metadata": {
+                "designer": { "x": 900, "y": 0 }
+              }
+            },
+            {
+              "id": 32,
+              "module": "json:ParseJSON",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "json": "{{31.choices[].message.content}}"
+              },
+              "metadata": {
+                "designer": { "x": 1100, "y": 0 }
+              }
+            },
+            {
+              "id": 33,
+              "module": "supabase:ActionSelectRows",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "clients",
+                "select": "id_number",
+                "filter": "{{if(30.has_mb; \"source_bureau=eq.\" + 30.mb_code + \"&\"; \"bureau_type=eq.own&\")}}gender=eq.{{32.gender}}&order=id_number.desc&limit=1"
+              },
+              "metadata": {
+                "designer": { "x": 1300, "y": 0 }
+              }
+            },
+            {
+              "id": 34,
+              "module": "builtin:BasicFeeder",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "bureau_code": "{{if(30.has_mb; 30.mb_code; \"SVMB\")}}",
+                "bureau_type": "{{if(30.has_mb; \"partner\"; \"own\")}}",
+                "next_id": "{{if(length(33) > 0; 33[].id_number + 1; if(30.has_mb; 601; 101))}}",
+                "gender_prefix": "{{if(32.gender = \"Male\"; \"M\"; if(32.gender = \"Female\"; \"F\"; \"X\"))}}",
+                "unique_code": "{{if(32.gender != null; 34.bureau_code + \"-\" + 34.gender_prefix + \"-\" + 34.next_id; \"PENDING\")}}"
+              },
+              "metadata": {
+                "designer": { "x": 1500, "y": 0 }
+              }
+            },
+            {
+              "id": 35,
+              "module": "supabase:ActionCreateARecord",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "clients",
+                "data": {
+                  "unique_code": "{{34.unique_code}}",
+                  "id_number": "{{34.next_id}}",
+                  "bureau_type": "{{34.bureau_type}}",
+                  "source_bureau": "{{34.bureau_code}}",
+                  "first_name": "{{32.first_name}}",
+                  "last_name": "{{32.last_name}}",
+                  "dob": "{{32.dob}}",
+                  "birth_time": "{{32.birth_time}}",
+                  "place_of_birth": "{{32.place_of_birth}}",
+                  "rashi": "{{32.rashi}}",
+                  "height": "{{32.height}}",
+                  "education": "{{32.education}}",
+                  "religion": "{{32.religion}}",
+                  "caste": "{{32.caste}}",
+                  "gender": "{{32.gender}}",
+                  "address": "{{32.address}}",
+                  "phone": "{{32.phone}}",
+                  "father_name": "{{32.father_name}}",
+                  "father_occupation": "{{32.father_occupation}}",
+                  "mother_name": "{{32.mother_name}}",
+                  "mother_occupation": "{{32.mother_occupation}}",
+                  "siblings": "{{32.siblings}}",
+                  "photo_url": null,
+                  "payment_status": "Not Paid",
+                  "profile_status": "Active",
+                  "match_status": "Unmatched"
+                }
+              },
+              "metadata": {
+                "designer": { "x": 1700, "y": 0 }
+              }
+            },
+            {
+              "id": 36,
+              "module": "supabase:ActionCreateARecord",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "pending_photos",
+                "data": {
+                  "chat_id": "{{1.message.chat.id}}",
+                  "client_id": "{{35.id}}",
+                  "expires_at": "{{addMinutes(now; 3)}}"
+                }
+              },
+              "metadata": {
+                "designer": { "x": 1900, "y": 0 },
+                "note": "Create pending photo record — expires in 3 minutes"
+              }
+            },
+            {
+              "id": 37,
+              "module": "supabase:ActionCreateARecord",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "activity_log",
+                "data": {
+                  "event_type": "profile_created",
+                  "client_id": "{{35.id}}",
+                  "telegram_message": "{{1.message.text}}",
+                  "details": "Profile created via Telegram (text only): {{34.unique_code}} - {{32.first_name}} {{32.last_name}}"
+                }
+              },
+              "metadata": {
+                "designer": { "x": 2100, "y": 0 }
+              }
+            },
+            {
+              "id": 38,
+              "module": "telegram:sendMessage",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "chatId": "{{1.message.chat.id}}",
+                "text": "✅ Profile of {{32.first_name}} {{32.last_name}} saved as {{34.unique_code}}.\n\n📸 Send photo within 3 minutes to link it, or upload from dashboard later.\n\n━━━━━━━━━━━━━━━━━━━━\n👤 Name     : {{32.first_name}} {{32.last_name}}\n⚥  Gender   : {{if(32.gender; 32.gender; \"Not detected\")}}\n🎂 DOB      : {{32.dob}}\n📏 Height   : {{32.height}}\n🎓 Education: {{32.education}}\n🏠 Bureau   : {{34.bureau_code}}\n💳 Payment  : Not Paid\n📸 Photo    : Pending ⏳\n━━━━━━━━━━━━━━━━━━━━\nSend EDIT {{34.unique_code}} [field] [value] to correct any detail.",
+                "parseMode": ""
+              },
+              "metadata": {
+                "designer": { "x": 2300, "y": 0 }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Branch 4 — Photo Only (Link to Pending or Unlinked)",
+          "flow": [
+            {
+              "id": 40,
+              "module": "builtin:BasicFeeder",
+              "version": 1,
+              "parameters": {},
+              "filter": {
+                "name": "Photo only, no caption",
+                "conditions": [
+                  [
+                    {
+                      "a": "{{1.message.photo}}",
+                      "o": "exist"
+                    },
+                    {
+                      "a": "{{1.message.caption}}",
+                      "o": "notExist"
+                    }
+                  ]
+                ]
+              },
+              "mapper": {},
+              "metadata": {
+                "designer": { "x": 600, "y": 200 }
+              }
+            },
+            {
+              "id": 41,
+              "module": "supabase:ActionSelectRows",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "pending_photos",
+                "select": "*,client:client_id(id,unique_code,first_name,last_name)",
+                "filter": "chat_id=eq.{{1.message.chat.id}}&expires_at=gt.{{formatDate(now; \"YYYY-MM-DDTHH:mm:ssZ\")}}&order=created_at.desc&limit=1"
+              },
+              "metadata": {
+                "designer": { "x": 900, "y": 200 },
+                "note": "Check for pending photo records that haven't expired"
+              }
+            },
+            {
+              "id": 42,
+              "module": "telegram:downloadFile",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "fileId": "{{last(1.message.photo).file_id}}"
+              },
+              "metadata": {
+                "designer": { "x": 1100, "y": 200 }
+              }
+            },
+            {
+              "id": 43,
+              "module": "supabase:ActionUploadFile",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "bucket": "profile-photos",
+                "path": "{{if(length(41) > 0; \"\"; \"unlinked_\")}}{{formatDate(now; \"YYYYMMDD_HHmmss\")}}_{{substring(uuid; 0; 8)}}.jpg",
+                "file": "{{42.data}}",
+                "contentType": "image/jpeg"
+              },
+              "metadata": {
+                "designer": { "x": 1300, "y": 200 },
+                "note": "Upload with 'unlinked_' prefix if no pending record found"
+              }
+            },
+            {
+              "id": 44,
+              "module": "builtin:BasicRouter",
+              "version": 1,
+              "parameters": {},
+              "mapper": {},
+              "metadata": {
+                "designer": { "x": 1500, "y": 200 }
+              },
+              "routes": [
+                {
+                  "name": "Pending record found — link photo",
+                  "flow": [
+                    {
+                      "id": 45,
+                      "module": "builtin:BasicFeeder",
+                      "version": 1,
+                      "parameters": {},
+                      "filter": {
+                        "name": "Has pending record",
+                        "conditions": [
+                          [
+                            {
+                              "a": "{{length(41)}}",
+                              "b": "0",
+                              "o": "number:greaterThan"
+                            }
+                          ]
+                        ]
+                      },
+                      "mapper": {},
+                      "metadata": {
+                        "designer": { "x": 1800, "y": 100 }
+                      }
+                    },
+                    {
+                      "id": 46,
+                      "module": "supabase:ActionUpdateARecord",
+                      "version": 1,
+                      "parameters": {},
+                      "mapper": {
+                        "table": "clients",
+                        "filter": "id=eq.{{41[].client_id}}",
+                        "data": {
+                          "photo_url": "{{43.publicUrl}}"
+                        }
+                      },
+                      "metadata": {
+                        "designer": { "x": 2000, "y": 100 }
+                      }
+                    },
+                    {
+                      "id": 47,
+                      "module": "supabase:ActionDeleteRecords",
+                      "version": 1,
+                      "parameters": {},
+                      "mapper": {
+                        "table": "pending_photos",
+                        "filter": "id=eq.{{41[].id}}"
+                      },
+                      "metadata": {
+                        "designer": { "x": 2200, "y": 100 }
+                      }
+                    },
+                    {
+                      "id": 48,
+                      "module": "supabase:ActionCreateARecord",
+                      "version": 1,
+                      "parameters": {},
+                      "mapper": {
+                        "table": "activity_log",
+                        "data": {
+                          "event_type": "photo_uploaded",
+                          "client_id": "{{41[].client_id}}",
+                          "details": "Photo linked to {{41[].client.unique_code}} — {{41[].client.first_name}} {{41[].client.last_name}}"
+                        }
+                      },
+                      "metadata": {
+                        "designer": { "x": 2400, "y": 100 }
+                      }
+                    },
+                    {
+                      "id": 49,
+                      "module": "telegram:sendMessage",
+                      "version": 1,
+                      "parameters": {},
+                      "mapper": {
+                        "chatId": "{{1.message.chat.id}}",
+                        "text": "✅ Photo linked to {{41[].client.unique_code}} — {{41[].client.first_name}} {{41[].client.last_name}}",
+                        "parseMode": ""
+                      },
+                      "metadata": {
+                        "designer": { "x": 2600, "y": 100 }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "name": "No pending record — store as unlinked",
+                  "flow": [
+                    {
+                      "id": 50,
+                      "module": "builtin:BasicFeeder",
+                      "version": 1,
+                      "parameters": {},
+                      "filter": {
+                        "name": "No pending record",
+                        "conditions": [
+                          [
+                            {
+                              "a": "{{length(41)}}",
+                              "b": "0",
+                              "o": "number:equal"
+                            }
+                          ]
+                        ]
+                      },
+                      "mapper": {},
+                      "metadata": {
+                        "designer": { "x": 1800, "y": 300 }
+                      }
+                    },
+                    {
+                      "id": 51,
+                      "module": "telegram:sendMessage",
+                      "version": 1,
+                      "parameters": {},
+                      "mapper": {
+                        "chatId": "{{1.message.chat.id}}",
+                        "text": "⚠️ Photo received but no recent profile found to link it to.\n\nThe photo has been saved with an 'unlinked' prefix. You can:\n1. Link it manually from the dashboard\n2. Resend biodata first, then send the photo within 3 minutes",
+                        "parseMode": ""
+                      },
+                      "metadata": {
+                        "designer": { "x": 2000, "y": 300 }
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Branch 5 — PDF Biodata",
+          "flow": [
+            {
+              "id": 60,
+              "module": "builtin:BasicFeeder",
+              "version": 1,
+              "parameters": {},
+              "filter": {
+                "name": "Has document with PDF",
+                "conditions": [
+                  [
+                    {
+                      "a": "{{1.message.document.mime_type}}",
+                      "b": "application/pdf",
+                      "o": "text:equal"
+                    }
+                  ]
+                ]
+              },
+              "mapper": {},
+              "metadata": {
+                "designer": { "x": 600, "y": 400 }
+              }
+            },
+            {
+              "id": 61,
+              "module": "telegram:downloadFile",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "fileId": "{{1.message.document.file_id}}"
+              },
+              "metadata": {
+                "designer": { "x": 900, "y": 400 }
+              }
+            },
+            {
+              "id": 62,
+              "module": "openai:createChatCompletion",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "model": "gpt-4o-mini",
+                "messages": [
+                  {
+                    "role": "system",
+                    "content": "You are a data extraction assistant for Sri Venkateshwara Marriage Bureau. You will receive raw biodata text in any format — it may be unstructured, contain spelling variations, be in English mixed with Telugu or Hindi words, or have missing fields.\n\nExtract the following fields and return ONLY a valid JSON object. No preamble, no explanation, no markdown code fences. Just raw JSON.\n\nRules:\n- For name: if format is \"Initial.Name\" (e.g. M.Aishwarya or K. Suresh), the initial before the dot is first_name, everything after is last_name. If format is \"Firstname Lastname\", split normally. If only one name, put it in first_name, last_name = null.\n- For gender: detect from name context, explicit mention, or family clues (e.g. \"sister of\", \"bride\", \"groom\"). If cannot determine, return null.\n- For dob: return in YYYY-MM-DD format. Accept inputs like 29-08-1998, 29/08/1998, Aug 29 1998, etc.\n- For height: return as provided (e.g. \"5.1\", \"5'4\\\"\", \"162cm\")\n- For siblings: return the full text block exactly as written.\n- For address: return the full multi-line address as a single string.\n- If a field is not present in the biodata, return null for that field.\n- Do not guess or hallucinate any field values.\n\nReturn this JSON structure:\n{\"first_name\":\"\",\"last_name\":null,\"gender\":null,\"dob\":\"\",\"birth_time\":null,\"place_of_birth\":null,\"rashi\":null,\"height\":\"\",\"education\":\"\",\"religion\":null,\"caste\":null,\"address\":\"\",\"phone\":null,\"father_name\":null,\"father_occupation\":null,\"mother_name\":null,\"mother_occupation\":null,\"siblings\":null}"
+                  },
+                  {
+                    "role": "user",
+                    "content": "Extract biodata from this PDF content:\n\n{{base64(61.data)}}"
+                  }
+                ],
+                "temperature": 0.1,
+                "max_tokens": 1000
+              },
+              "metadata": {
+                "designer": { "x": 1100, "y": 400 },
+                "note": "Send PDF content to GPT for extraction"
+              }
+            },
+            {
+              "id": 63,
+              "module": "json:ParseJSON",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "json": "{{62.choices[].message.content}}"
+              },
+              "metadata": {
+                "designer": { "x": 1300, "y": 400 }
+              }
+            },
+            {
+              "id": 64,
+              "module": "supabase:ActionSelectRows",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "clients",
+                "select": "id_number",
+                "filter": "bureau_type=eq.own&gender=eq.{{63.gender}}&order=id_number.desc&limit=1"
+              },
+              "metadata": {
+                "designer": { "x": 1500, "y": 400 }
+              }
+            },
+            {
+              "id": 65,
+              "module": "builtin:BasicFeeder",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "next_id": "{{if(length(64) > 0; 64[].id_number + 1; 101)}}",
+                "gender_prefix": "{{if(63.gender = \"Male\"; \"M\"; if(63.gender = \"Female\"; \"F\"; \"X\"))}}",
+                "unique_code": "{{if(63.gender != null; \"SVMB-\" + 65.gender_prefix + \"-\" + 65.next_id; \"PENDING\")}}"
+              },
+              "metadata": {
+                "designer": { "x": 1700, "y": 400 }
+              }
+            },
+            {
+              "id": 66,
+              "module": "supabase:ActionCreateARecord",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "clients",
+                "data": {
+                  "unique_code": "{{65.unique_code}}",
+                  "id_number": "{{65.next_id}}",
+                  "bureau_type": "own",
+                  "source_bureau": "SVMB",
+                  "first_name": "{{63.first_name}}",
+                  "last_name": "{{63.last_name}}",
+                  "dob": "{{63.dob}}",
+                  "birth_time": "{{63.birth_time}}",
+                  "place_of_birth": "{{63.place_of_birth}}",
+                  "rashi": "{{63.rashi}}",
+                  "height": "{{63.height}}",
+                  "education": "{{63.education}}",
+                  "religion": "{{63.religion}}",
+                  "caste": "{{63.caste}}",
+                  "gender": "{{63.gender}}",
+                  "address": "{{63.address}}",
+                  "phone": "{{63.phone}}",
+                  "father_name": "{{63.father_name}}",
+                  "father_occupation": "{{63.father_occupation}}",
+                  "mother_name": "{{63.mother_name}}",
+                  "mother_occupation": "{{63.mother_occupation}}",
+                  "siblings": "{{63.siblings}}",
+                  "photo_url": null,
+                  "payment_status": "Not Paid",
+                  "profile_status": "Active",
+                  "match_status": "Unmatched"
+                }
+              },
+              "metadata": {
+                "designer": { "x": 1900, "y": 400 }
+              }
+            },
+            {
+              "id": 67,
+              "module": "supabase:ActionCreateARecord",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "pending_photos",
+                "data": {
+                  "chat_id": "{{1.message.chat.id}}",
+                  "client_id": "{{66.id}}",
+                  "expires_at": "{{addMinutes(now; 3)}}"
+                }
+              },
+              "metadata": {
+                "designer": { "x": 2100, "y": 400 }
+              }
+            },
+            {
+              "id": 68,
+              "module": "supabase:ActionCreateARecord",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "table": "activity_log",
+                "data": {
+                  "event_type": "profile_created",
+                  "client_id": "{{66.id}}",
+                  "details": "Profile created via Telegram (PDF): {{65.unique_code}} - {{63.first_name}} {{63.last_name}}"
+                }
+              },
+              "metadata": {
+                "designer": { "x": 2300, "y": 400 }
+              }
+            },
+            {
+              "id": 69,
+              "module": "telegram:sendMessage",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "chatId": "{{1.message.chat.id}}",
+                "text": "✅ Profile of {{63.first_name}} {{63.last_name}} saved as {{65.unique_code}} (from PDF).\n\n📸 Send photo within 3 minutes to link it, or upload from dashboard later.\n━━━━━━━━━━━━━━━━━━━━\n👤 Name     : {{63.first_name}} {{63.last_name}}\n⚥  Gender   : {{if(63.gender; 63.gender; \"Not detected\")}}\n🎂 DOB      : {{63.dob}}\n📏 Height   : {{63.height}}\n🎓 Education: {{63.education}}\n🏠 Bureau   : SVMB\n💳 Payment  : Not Paid\n📸 Photo    : Pending ⏳\n━━━━━━━━━━━━━━━━━━━━\nSend EDIT {{65.unique_code}} [field] [value] to correct any detail.",
+                "parseMode": ""
+              },
+              "metadata": {
+                "designer": { "x": 2500, "y": 400 }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "version": 1,
+    "scenario": {
+      "roundtrips": 1,
+      "maxErrors": 3,
+      "autoCommit": true,
+      "autoCommitTriggerLast": true,
+      "sequential": false,
+      "confidential": false,
+      "dataloss": false,
+      "dlq": false
+    },
+    "designer": {
+      "orphans": []
+    },
+    "zone": "eu2.make.com",
+    "notes": "SVMB Marriage Bureau — Telegram Bot Automation\n\nBranch 1: EDIT command (update existing profile)\nBranch 2: Photo + Caption (full biodata with photo)\nBranch 3: Text Only (biodata without photo, creates pending_photo)\nBranch 4: Photo Only (links to pending or saves as unlinked)\nBranch 5: PDF biodata\n\nIMPORTANT: After importing, you MUST:\n1. Assign your Telegram Bot connection to all Telegram modules\n2. Assign your Supabase connection to all Supabase modules\n3. Assign your OpenAI connection to all OpenAI modules\n4. Test each branch separately"
+  }
+}
