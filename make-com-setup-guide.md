@@ -1,5 +1,13 @@
 # Make.com Scenario Setup Guide — SVMB
 
+> **Important update:** The original `make-com-blueprint.json` may import into
+> Make.com with many **"Module Not Found"** blocks. If that happens, do not try
+> to repair the imported scenario module by module. Use
+> `make-com-v2-http-workflow.md` instead. The v2 guide rebuilds the workflow
+> with Make built-ins plus HTTP requests to Supabase, OpenAI, and Telegram,
+> avoiding the fragile Supabase/OpenAI/Telegram action modules that failed in
+> the imported blueprint.
+
 ## Quick Start (3 Steps)
 
 ### Step 1: Import the Blueprint
